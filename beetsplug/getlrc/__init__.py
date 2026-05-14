@@ -59,7 +59,7 @@ class GetLrcPlugin(BeetsPlugin):
         lrc_path_str = displayable_path(lrc_path)
 
         if not force and os.path.exists(syspath(lrc_path)):
-            self._log.debug(f'Skipping {audio_path_str}: .lrc already exists')
+            self._log.debug(f'Skip: {item.artist} - {item.title}')
             return False
 
         artist = item.artist or item.albumartist
@@ -67,7 +67,7 @@ class GetLrcPlugin(BeetsPlugin):
         duration = int(item.length) if item.length else None
 
         if not artist or not title or not duration:
-            self._log.warning(f'Missing metadata for {audio_path_str}')
+            self._log.warning(f'Skip: missing metadata for {artist} - {title}')
             return False
 
         params = {
@@ -78,7 +78,7 @@ class GetLrcPlugin(BeetsPlugin):
         url = 'https://lrclib.net/api/get?' + urllib.parse.urlencode(params)
 
         if pretend:
-            self._log.info(f'Would fetch: {artist} - {title} ({duration}s)')
+            self._log.info(f'Would fetch: {artist} - {title}')
             return True
 
         timeout = self.config['timeout'].get(int)
@@ -90,33 +90,34 @@ class GetLrcPlugin(BeetsPlugin):
             response.raise_for_status()
             data = response.json()
         except requests.Timeout:
-            self._log.warning(f'Timeout after {retries} attempts: {audio_path_str}')
+            self._log.warning(f'Timeout: {artist} - {title}')
             return False
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
-                self._log.info(f'Not found on lrclib: {artist} - {title}')
+                self._log.info(f'Not found: {artist} - {title}')
             else:
-                self._log.warning(f'Request failed for {audio_path_str}: {e}')
+                status = e.response.status_code if e.response else '?'
+                self._log.warning(f'HTTP {status}: {artist} - {title}')
             return False
-        except requests.RequestException as e:
-            self._log.warning(f'Request failed for {audio_path_str}: {e}')
+        except requests.RequestException:
+            self._log.warning(f'Network error: {artist} - {title}')
             return False
-        except ValueError as e:
-            self._log.warning(f'Invalid JSON for {audio_path_str}: {e}')
+        except ValueError:
+            self._log.warning(f'Bad response: {artist} - {title}')
             return False
 
         synced = data.get('syncedLyrics')
         if not synced or synced in (None, 'null', 'None'):
-            self._log.info(f'No synced lyrics found: {artist} - {title}')
+            self._log.info(f'No synced lyrics: {artist} - {title}')
             return False
 
         try:
             with open(syspath(lrc_path), 'w', encoding='utf-8') as f:
                 f.write(synced)
-            self._log.info(f'Created {lrc_path_str}')
+            self._log.info(f'Created: {artist} - {title}')
             return True
         except OSError as e:
-            self._log.error(f'Failed to write {lrc_path_str}: {e}')
+            self._log.error(f'Write failed: {artist} - {title} ({e})')
             return False
 
     def item_imported(self, lib, item):
@@ -135,4 +136,9 @@ class GetLrcPlugin(BeetsPlugin):
         if opts.album:
             for album in lib.albums(decargs(args)):
                 for item in album.items():
-                    self.fetch_lrc(item, force=force,
+                    self.fetch_lrc(item, force=force, pretend=pretend)
+                    time.sleep(self.config['delay'].get(float))
+        else:
+            for item in lib.items(decargs(args)):
+                self.fetch_lrc(item, force=force, pretend=pretend)
+                time.sleep(self.config['delay'].get(float))

@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 beets_getlrc.egg-info/PKG-INFO
 beets_getlrc.egg-info/SOURCES.txt
