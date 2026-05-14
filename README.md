@@ -1,0 +1,59 @@
+# beets-getlrc
+
+A [beets](https://beets.io) plugin that downloads synced `.lrc` lyric files for your music.
+
+## What does this do?
+
+Some digital audio players (like the HiBy R3, Shanling M0 Pro, FiiO devices, etc.) can display **synced lyrics** — the kind that scroll line-by-line as the song plays — but they require a separate `.lrc` file next to each track.
+
+Beets already has a built-in `lyrics` plugin that fetches plain text lyrics and stores them in your library database. **beets-getlrc** fills a different gap: it fetches *synced* `.lrc` files from [lrclib.net](https://lrclib.net) and saves them as sidecar files right next to your FLAC or MP3s.
+
+## Installation
+
+```
+bash
+# If you installed beets with pip:
+pip install beets-getlrc
+
+# If you installed beets with pipx (recommended):
+pipx inject beets beets-getlrc
+```
+
+## Configuration
+Add getlrc to your beets config and tweak the options if needed:
+
+plugins:
+  - getlrc
+  -  ... your other plugins
+
+getlrc:
+    auto: yes          # Fetch lyrics automatically when importing new music
+    overwrite: no      # Don't replace existing .lrc files unless you say so
+    timeout: 30        # Seconds to wait per request (prevents hanging)
+    retries: 3         # How many times to retry if lrclib.net is slow
+    delay: 0.5         # Seconds between requests (prevents rate-limit errors)
+
+  ## Usage
+  Run it manually any time with the beet getlrc command:
+| Command                  | Description                                                           |
+| ------------------------ | --------------------------------------------------------------------- |
+| `beet getlrc`            | Fetch lyrics for **all** tracks in your library                       |
+| `beet getlrc beatles`    | Only fetch for tracks matching "beatles"                              |
+| `beet getlrc -a beatles` | Fetch for albums matching "beatles"                                   |
+| `beet getlrc -f`         | Force overwrite existing `.lrc` files                                 |
+| `beet getlrc -p`         | Pretend mode — shows what *would* be fetched without writing anything |
+
+## How it Works
+1. The plugin looks for the artist and other tags in the meta data
+2. it looks for the lyrics at lrclib.net
+3. if found, it adds them to the folder using the same name structure you perfer
+### Example
+Music/
+├── 01 Song Name.flac
+└── 01 Song Name.lrc      <-- created by beets-getlrc
+## Requirements
+- beets 2.0.0 or newer
+- python 3.9 or later
+- internet
+## Notes
+- This only fetches synced lyrics, so if lrclib.net does not have them, then no lrc files will be created.
