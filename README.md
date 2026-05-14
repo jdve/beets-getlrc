@@ -4,7 +4,7 @@ A [beets](https://beets.io) plugin that downloads synced `.lrc` lyric files for 
 
 ## What does this do?
 
-Some digital audio players (like the HiBy R3, Shanling M0 Pro, FiiO devices, etc.) can display **synced lyrics** — the kind that scroll line-by-line as the song plays — but they require a separate `.lrc` file next to each track.
+Some digital audio players (like the walkman, HiBy R3, Shanling M0 Pro, FiiO devices, etc.) can display **synced lyrics** — the kind that scroll line-by-line as the song plays — but they require a separate `.lrc` file next to each track.
 
 Beets already has a built-in `lyrics` plugin that fetches plain text lyrics and stores them in your library database. **beets-getlrc** fills a different gap: it fetches *synced* `.lrc` files from [lrclib.net](https://lrclib.net) and saves them as sidecar files right next to your FLAC or MP3s.
 
