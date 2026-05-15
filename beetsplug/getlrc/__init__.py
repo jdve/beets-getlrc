@@ -2,7 +2,7 @@
 
 from beets.plugins import BeetsPlugin
 from beets.ui import Subcommand, decargs
-from beets.util import displayable_path, bytestring_path, syspath
+from beets.util import bytestring_path, syspath
 import requests
 import urllib.parse
 import os
@@ -23,6 +23,44 @@ class _C:
     RESET = '\033[0m'
 
 
+class Stats:
+    """Track fetch results for summary reporting."""
+    def __init__(self):
+        self.created = 0
+        self.skipped = 0
+        self.not_found = 0
+        self.no_synced = 0
+        self.missing_meta = 0
+        self.errors = 0
+        self.cached = 0
+
+    @property
+    def total(self):
+        return (self.created + self.skipped + self.not_found +
+                self.no_synced + self.missing_meta + self.errors + self.cached)
+
+    def print_summary(self, use_color=False):
+        lines = [
+            '',
+            f"{'getlrc summary':─^50}",
+            f"  {'Created:':<20} {self.created}",
+            f"  {'Skipped (exists):':<20} {self.skipped}",
+            f"  {'Cached skip:':<20} {self.cached}",
+            f"  {'Not found (404):':<20} {self.not_found}",
+            f"  {'No synced lyrics:':<20} {self.no_synced}",
+            f"  {'Missing metadata:':<20} {self.missing_meta}",
+            f"  {'Errors:':<20} {self.errors}",
+            f"{'':─<50}",
+            f"  {'Total processed:':<20} {self.total}",
+        ]
+        if use_color:
+            lines[0] = f"{_C.BOLD}{'getlrc summary':─^50}{_C.RESET}"
+            lines[1] = f"{_C.BOLD}{'getlrc summary':─^50}{_C.RESET}"
+            lines[2] = f"  {_C.GREEN}{'Created:':<20}{_C.RESET} {self.created}"
+            lines[7] = f"  {_C.RED}{'Errors:':<20}{_C.RESET} {self.errors}"
+        print('\n'.join(lines))
+
+
 class GetLrcPlugin(BeetsPlugin):
     def __init__(self):
         super().__init__()
@@ -37,6 +75,7 @@ class GetLrcPlugin(BeetsPlugin):
             'delay': 0.5,
             'cache_results': True,
             'recheck_days': 30,
+            'stats' : True
         })
 
         if self.config['auto']:
@@ -44,8 +83,8 @@ class GetLrcPlugin(BeetsPlugin):
             self.register_listener('album_imported', self.album_imported)
 
     def _fmt(self, status, item, color=''):
-        """Format a log line: Status + Artist - Album - Song."""
-        artist = item.artist or item.albumartist or 'Unknown'
+        """Format a log line: Status + Artist - Album - Title."""
+        artist = item.albumartist or item.artist or 'Unknown'
         album = item.album or 'Unknown Album'
         title = item.title or 'Unknown'
 
@@ -65,6 +104,8 @@ class GetLrcPlugin(BeetsPlugin):
                               dest='album', help='Match albums instead of tracks')
         cmd.parser.add_option('-p', '--pretend', action='store_true',
                               dest='pretend', help='Show what would be fetched without writing')
+        cmd.parser.add_option('-s', '--stats', action='store_true',
+                              dest='stats', help='Print summary stats when done')
         cmd.func = self.command
         return [cmd]
 
@@ -80,20 +121,20 @@ class GetLrcPlugin(BeetsPlugin):
                 time.sleep(wait)
         return None
 
-        def _should_skip_cached(self, item, force):
+    def _should_skip_cached(self, item, force):
         if force or not self.config['cache_results']:
             return False
         status = item.get('getlrc_status')
         checked_str = item.get('getlrc_checked')
         if not status or not checked_str:
             return False
-        
-        # Only skip negative results. Positive results (created/exists) 
-        # are handled by the filesystem .lrc check, so deleting a file 
-        # allows immediate re-fetch without waiting for cache expiry.
+
+        # Only skip negative results — positive results are handled by
+        # the filesystem .lrc check, so deleting a file allows immediate
+        # re-fetch without waiting for cache expiry.
         if status in ('created', 'exists'):
             return False
-        
+
         try:
             checked = datetime.fromisoformat(checked_str)
             recheck = timedelta(days=self.config['recheck_days'].get(int))
@@ -111,24 +152,31 @@ class GetLrcPlugin(BeetsPlugin):
         item['getlrc_checked'] = datetime.now().isoformat()
         item.store()
 
-    def fetch_lrc(self, item, force=False, pretend=False):
+    def fetch_lrc(self, item, force=False, pretend=False, stats=None):
         base = os.path.splitext(item.path)[0]
         lrc_path = bytestring_path(base + b'.lrc')
+
         if not force and os.path.exists(syspath(lrc_path)):
             self._log.debug(self._fmt('Skip (exists)', item))
             self._update_cache(item, 'exists')
+            if stats:
+                stats.skipped += 1
             return False
 
         if self._should_skip_cached(item, force):
+            if stats:
+                stats.cached += 1
             return False
 
-        artist = item.artist or item.albumartist or 'Unknown'
+        artist = item.albumartist or item.artist or 'Unknown'
         title = item.title or 'Unknown'
         duration = int(item.length) if item.length else None
 
-        if not item.artist or not item.title or not duration:
+        if not item.title or not duration:
             self._log.warning(self._fmt('Skip (missing metadata)', item, _C.YELLOW))
             self._update_cache(item, 'missing')
+            if stats:
+                stats.missing_meta += 1
             return False
 
         params = {
@@ -153,29 +201,41 @@ class GetLrcPlugin(BeetsPlugin):
         except requests.Timeout:
             self._log.warning(self._fmt('Timeout', item, _C.YELLOW))
             self._update_cache(item, 'timeout')
+            if stats:
+                stats.errors += 1
             return False
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
                 self._log.info(self._fmt('Not found', item, _C.RED))
                 self._update_cache(item, 'not_found')
+                if stats:
+                    stats.not_found += 1
             else:
-                status = e.response.status_code if e.response else '?'
-                self._log.warning(self._fmt(f'HTTP {status}', item, _C.RED))
+                code = e.response.status_code if e.response else '?'
+                self._log.warning(self._fmt(f'HTTP {code}', item, _C.RED))
                 self._update_cache(item, 'error')
+                if stats:
+                    stats.errors += 1
             return False
         except requests.RequestException:
             self._log.warning(self._fmt('Network error', item, _C.RED))
             self._update_cache(item, 'error')
+            if stats:
+                stats.errors += 1
             return False
         except ValueError:
             self._log.warning(self._fmt('Bad response', item, _C.RED))
             self._update_cache(item, 'error')
+            if stats:
+                stats.errors += 1
             return False
 
         synced = data.get('syncedLyrics')
         if not synced or synced in (None, 'null', 'None'):
             self._log.info(self._fmt('No synced lyrics', item, _C.RED))
             self._update_cache(item, 'no_synced')
+            if stats:
+                stats.no_synced += 1
             return False
 
         try:
@@ -183,31 +243,40 @@ class GetLrcPlugin(BeetsPlugin):
                 f.write(synced)
             self._log.info(self._fmt('Created', item, _C.GREEN))
             self._update_cache(item, 'created')
+            if stats:
+                stats.created += 1
             return True
         except OSError as e:
             self._log.error(self._fmt('Write failed', item, _C.RED) + f' ({e})')
             self._update_cache(item, 'error')
+            if stats:
+                stats.errors += 1
             return False
 
     def item_imported(self, lib, item):
-        self.fetch_lrc(item, force=self.config['overwrite'])
+        self.fetch_lrc(item, force=self.config['overwrite'].get(bool))
         time.sleep(self.config['delay'].get(float))
 
     def album_imported(self, lib, album):
         for item in album.items():
-            self.fetch_lrc(item, force=self.config['overwrite'])
+            self.fetch_lrc(item, force=self.config['overwrite'].get(bool))
             time.sleep(self.config['delay'].get(float))
 
     def command(self, lib, opts, args):
-        force = opts.force or self.config['overwrite']
+        force = opts.force or self.config['overwrite'].get(bool)
         pretend = opts.pretend
+        show_stats = opts.stats
+        stats = Stats() if show_stats else None
 
         if opts.album:
             for album in lib.albums(decargs(args)):
                 for item in album.items():
-                    self.fetch_lrc(item, force=force, pretend=pretend)
+                    self.fetch_lrc(item, force=force, pretend=pretend, stats=stats)
                     time.sleep(self.config['delay'].get(float))
         else:
             for item in lib.items(decargs(args)):
-                self.fetch_lrc(item, force=force, pretend=pretend)
+                self.fetch_lrc(item, force=force, pretend=pretend, stats=stats)
                 time.sleep(self.config['delay'].get(float))
+
+        if show_stats and stats:
+            stats.print_summary(use_color=self._use_color)
