@@ -19,6 +19,7 @@ class _C:
     YELLOW = '\033[93m'
     BLUE = '\033[94m'
     CYAN = '\033[96m'
+    MAGENTA = '\033[95m'
     BOLD = '\033[1m'
     RESET = '\033[0m'
 
@@ -40,24 +41,20 @@ class Stats:
                 self.no_synced + self.missing_meta + self.errors + self.cached)
 
     def print_summary(self, use_color=False):
+        c = _C if use_color else type('_NoColor', (), {k: '' for k in dir(_C) if not k.startswith('_')})()
         lines = [
             '',
-            f"{'getlrc summary':─^50}",
-            f"  {'Created:':<20} {self.created}",
-            f"  {'Skipped (exists):':<20} {self.skipped}",
-            f"  {'Cached skip:':<20} {self.cached}",
-            f"  {'Not found (404):':<20} {self.not_found}",
-            f"  {'No synced lyrics:':<20} {self.no_synced}",
-            f"  {'Missing metadata:':<20} {self.missing_meta}",
-            f"  {'Errors:':<20} {self.errors}",
-            f"{'':─<50}",
-            f"  {'Total processed:':<20} {self.total}",
+            f"{c.BOLD}{'─'*50}{c.RESET}",
+            f"  {c.GREEN}{'Created:':<<20}{c.RESET} {self.created}",
+            f"  {'Skipped (exists):':<<20} {self.skipped}",
+            f"  {'Cached skip:':<<20} {self.cached}",
+            f"  {c.RED}{'Not found (404):':<<20}{c.RESET} {self.not_found}",
+            f"  {c.RED}{'No synced lyrics:':<<20}{c.RESET} {self.no_synced}",
+            f"  {c.YELLOW}{'Missing metadata:':<<20}{c.RESET} {self.missing_meta}",
+            f"  {c.RED}{'Errors:':<<20}{c.RESET} {self.errors}",
+            f"{c.BOLD}{'─'*50}{c.RESET}",
+            f"  {c.BOLD}{'Total processed:':<<20}{c.RESET} {self.total}",
         ]
-        if use_color:
-            lines[0] = f"{_C.BOLD}{'getlrc summary':─^50}{_C.RESET}"
-            lines[1] = f"{_C.BOLD}{'getlrc summary':─^50}{_C.RESET}"
-            lines[2] = f"  {_C.GREEN}{'Created:':<20}{_C.RESET} {self.created}"
-            lines[7] = f"  {_C.RED}{'Errors:':<20}{_C.RESET} {self.errors}"
         print('\n'.join(lines))
 
 
@@ -75,7 +72,7 @@ class GetLrcPlugin(BeetsPlugin):
             'delay': 0.5,
             'cache_results': True,
             'recheck_days': 30,
-            'stats' : True
+            'stats': True
         })
 
         if self.config['auto']:
@@ -94,6 +91,21 @@ class GetLrcPlugin(BeetsPlugin):
                 f"{_C.BLUE}{artist} - {album}{_C.RESET} - {title}"
             )
         return f"{status}: {artist} - {album} - {title}"
+
+    def _print(self, status, item, color=''):
+        """Print directly to stdout with color (bypasses beets logging)."""
+        artist = item.albumartist or item.artist or 'Unknown'
+        album = item.album or 'Unknown Album'
+        title = item.title or 'Unknown'
+
+        if self._use_color and color:
+            print(
+                f"{color}{status}:{_C.RESET} "
+                f"{_C.BLUE}{artist} - {album}{_C.RESET} - "
+                f"{_C.CYAN}{title}{_C.RESET}"
+            )
+        else:
+            print(f"{status}: {artist} - {album} - {title}")
 
     def commands(self):
         cmd = Subcommand('getlrc',
@@ -187,7 +199,7 @@ class GetLrcPlugin(BeetsPlugin):
         url = 'https://lrclib.net/api/get?' + urllib.parse.urlencode(params)
 
         if pretend:
-            self._log.info(self._fmt('Would fetch', item, _C.CYAN))
+            self._print('Would fetch', item, _C.CYAN)
             return True
 
         timeout = self.config['timeout'].get(int)
@@ -206,7 +218,7 @@ class GetLrcPlugin(BeetsPlugin):
             return False
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
-                self._log.info(self._fmt('Not found', item, _C.RED))
+                self._print('Not found', item, _C.RED)
                 self._update_cache(item, 'not_found')
                 if stats:
                     stats.not_found += 1
@@ -232,7 +244,7 @@ class GetLrcPlugin(BeetsPlugin):
 
         synced = data.get('syncedLyrics')
         if not synced or synced in (None, 'null', 'None'):
-            self._log.info(self._fmt('No synced lyrics', item, _C.RED))
+            self._print('No synced lyrics', item, _C.RED)
             self._update_cache(item, 'no_synced')
             if stats:
                 stats.no_synced += 1
@@ -241,7 +253,7 @@ class GetLrcPlugin(BeetsPlugin):
         try:
             with open(syspath(lrc_path), 'w', encoding='utf-8') as f:
                 f.write(synced)
-            self._log.info(self._fmt('Created', item, _C.GREEN))
+            self._print('Created', item, _C.GREEN)
             self._update_cache(item, 'created')
             if stats:
                 stats.created += 1
