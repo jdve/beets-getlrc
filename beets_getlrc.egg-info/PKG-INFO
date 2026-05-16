@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: beets-getlrc
-Version: 0.1.8
+Version: 0.1.9
 Summary: Fetch synced .lrc lyrics from lrclib.net for beets
 License: MIT
 Project-URL: Homepage, https://github.com/YOURNAME/beets-getlrc
@@ -48,8 +48,10 @@ adjust the options as desired:
 | `retries` | `3` | How many times it retries |
 | `delay` | `0.5` | How long it waits before lookups (Seconds) |
 | `cache_results` | `yes` | Remember lookups in the beets database so it does not look for files its already checked|
-| `recheck_days` | `30` | How many days before retrying a song that it already looked for and cahced |
+| `recheck_days` | `30` | How many days before retrying a song that it already looked for and cached |
 | `stats` | `yes` | Print a summary of the lrc files found |
+| `progress` | `yes` | Show per-track progress and progress bar in the command output |
+| `workers` | `1` | Use multiple threads for faster fetching; set higher for network-bound workloads |
 
 ## Usage
 Run it manually any time with the beet getlrc command:

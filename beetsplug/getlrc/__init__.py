@@ -16,13 +16,14 @@ from datetime import datetime, timedelta
 
 
 class _C:
-    """ANSI color codes."""
-    GREEN = '\033[92m'
-    RED = '\033[91m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    MAGENTA = '\033[95m'
+    """ANSI color codes (colorblind-friendly palette)."""
+    GREEN = '\033[92m'   # Green success color
+    RED = '\033[95m'     # Magenta-like action/error color
+    YELLOW = '\033[93m'  # Warning color
+    BLUE = '\033[94m'    # Informational color
+    CYAN = '\033[96m'    # Highlight color
+    MAGENTA = '\033[95m' # Error/notice color
+    GREY = '\033[90m'    # Dim background / unfilled bar
     BOLD = '\033[1m'
     RESET = '\033[0m'
 
@@ -77,6 +78,9 @@ class Progress:
         self.enabled = enabled
         self.use_color = use_color
         self._lock = threading.Lock()
+        self._next_print = 1
+        self._pending = {}
+        self._start_time = time.monotonic()
 
     def increment(self):
         if not self.enabled:
@@ -85,12 +89,41 @@ class Progress:
             self.current += 1
             return self.current
 
-    def prefix(self):
+    def _format_elapsed(self, seconds):
+        minutes, seconds = divmod(int(seconds), 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def prefix(self, current=None):
         c = _C if self.use_color else type('_NoColor', (), {k: '' for k in dir(_C) if not k.startswith('_')})()
+        with self._lock:
+            current = self.current if current is None else current
+            total = self.total
+        elapsed = time.monotonic() - self._start_time
         bar_len = 10
-        filled = int((self.current / self.total) * bar_len) if self.total else bar_len
-        bar = '█' * filled + '-' * (bar_len - filled)
-        return f"{c.BOLD}getlrc: [{self.current:04d}/{self.total:04d}] [{bar}] {c.RESET}"
+        filled = int((current / total) * bar_len) if total else bar_len
+        percent = int((current / total) * 100) if total else 100
+        filled_part = f"{c.GREEN}{'█' * filled}{c.RESET}"
+        empty_part = f"{c.GREY}{'-' * (bar_len - filled)}{c.RESET}"
+        bar = filled_part + empty_part
+        return f"{c.BOLD}[{current:04d}/{total:04d}] [{bar}] {percent:3d}% {self._format_elapsed(elapsed)}{c.RESET} "
+
+    def log(self, message, count=None):
+        if not self.enabled or count is None:
+            print(message, flush=True)
+            return
+
+        with self._lock:
+            if count == self._next_print:
+                print(message, flush=True)
+                self._next_print += 1
+                while self._next_print in self._pending:
+                    print(self._pending.pop(self._next_print), flush=True)
+                    self._next_print += 1
+            else:
+                self._pending[count] = message
 
     def finish(self):
         if self.enabled:
@@ -109,12 +142,12 @@ class GetLrcPlugin(BeetsPlugin):
             'overwrite': False,
             'timeout': 30,
             'retries': 3,
-            'delay': 0.5,
+            'delay': 0.2,
             'cache_results': True,
             'recheck_days': 30,
             'stats': True,
             'fallback_to_plain': False,
-            'workers': 1,
+            'workers': 4,
             'progress': True,
             'output_dir': '',
         })
@@ -157,22 +190,26 @@ class GetLrcPlugin(BeetsPlugin):
             )
         return f"{status}: {artist} - {album} - {title}"
 
-    def _print(self, status, item, color='', progress=None):
+    def _print(self, status, item, color='', progress=None, progress_count=None, quiet=False):
         """Print directly to stdout with color (bypasses beets logging)."""
+        if quiet:
+            return
+
         artist = item.albumartist or item.artist or 'Unknown'
         album = item.album or 'Unknown Album'
         title = item.title or 'Unknown'
-        prefix = progress.prefix() if progress else ''
+        prefix = progress.prefix(progress_count) if progress else ''
+        message = (
+            f"{prefix}{color}{status}:{_C.RESET} "
+            f"{_C.BLUE}{artist}{_C.RESET} - "
+            f"{_C.MAGENTA}{album}{_C.RESET} - "
+            f"{_C.CYAN}{title}{_C.RESET}"
+        ) if self._use_color and color else f"{prefix}{status}: {artist} - {album} - {title}"
 
-        if self._use_color and color:
-            print(
-                f"{prefix}{color}{status}:{_C.RESET} "
-                f"{_C.BLUE}{artist}{_C.RESET} - "
-                f"{_C.MAGENTA}{album}{_C.RESET} - "
-                f"{_C.CYAN}{title}{_C.RESET}"
-            )
+        if progress:
+            progress.log(message, progress_count)
         else:
-            print(f"{prefix}{status}: {artist} - {album} - {title}")
+            print(message, flush=True)
 
     def commands(self):
         cmd = Subcommand('getlrc',
@@ -183,6 +220,12 @@ class GetLrcPlugin(BeetsPlugin):
                               dest='album', help='Match albums instead of tracks')
         cmd.parser.add_option('-p', '--pretend', action='store_true',
                               dest='pretend', help='Show what would be fetched without writing')
+        cmd.parser.add_option('-q', '--quiet', action='store_true',
+                              dest='quiet', help='Suppress per-track output and progress display')
+        cmd.parser.add_option('-w', '--workers', type='int',
+                              dest='workers', help='Number of concurrent fetch workers')
+        cmd.parser.add_option('--delay', type='float',
+                              dest='delay', help='Delay in seconds between lookups')
         cmd.parser.add_option('-s', '--stats', action='store_true',
                               dest='stats', help='Print summary stats when done')
         cmd.func = self.command
@@ -264,7 +307,7 @@ class GetLrcPlugin(BeetsPlugin):
         lrc_path_str = os.path.join(dir_path, lrc_basename)
         return bytestring_path(lrc_path_str)
 
-    def fetch_lrc(self, item, force=False, pretend=False, stats=None, progress=None):
+    def fetch_lrc(self, item, force=False, pretend=False, stats=None, progress=None, progress_count=None, quiet=False):
         try:
             lrc_path = self._get_lrc_path(item)
             lrc_path_str = displayable_path(lrc_path)
@@ -300,7 +343,7 @@ class GetLrcPlugin(BeetsPlugin):
             url = 'https://lrclib.net/api/get?' + urllib.parse.urlencode(params)
 
             if pretend:
-                self._print('Would fetch', item, _C.CYAN, progress=progress)
+                self._print('Would fetch', item, _C.CYAN, progress=progress, progress_count=progress_count)
                 return True
 
             timeout = self.config['timeout'].get(int)
@@ -319,7 +362,7 @@ class GetLrcPlugin(BeetsPlugin):
                 return False
             except requests.HTTPError as e:
                 if e.response is not None and e.response.status_code == 404:
-                    self._print('Not found', item, _C.RED, progress=progress)
+                    self._print('Not found', item, _C.RED, progress=progress, progress_count=progress_count)
                     self._update_cache(item, 'not_found')
                     if stats:
                         stats.add('not_found')
@@ -351,7 +394,7 @@ class GetLrcPlugin(BeetsPlugin):
                 try:
                     with open(syspath(lrc_path), 'w', encoding='utf-8') as f:
                         f.write(synced)
-                    self._print('Created', item, _C.GREEN, progress=progress)
+                    self._print('Created', item, _C.GREEN, progress=progress, progress_count=progress_count)
                     self._update_cache(item, 'created')
                     if stats:
                         stats.add('created')
@@ -367,14 +410,14 @@ class GetLrcPlugin(BeetsPlugin):
             if self.config['fallback_to_plain'].get(bool) and plain and not item.lyrics:
                 item.lyrics = plain
                 item.store()
-                self._print('Stored plain lyrics', item, _C.GREEN, progress=progress)
+                self._print('Stored plain lyrics', item, _C.GREEN, progress=progress, progress_count=progress_count)
                 self._update_cache(item, 'plain')
                 if stats:
                     stats.add('plain')
                 return True
 
             # 3. Nothing available
-            self._print('No synced lyrics', item, _C.RED, progress=progress)
+            self._print('No synced lyrics', item, _C.RED, progress=progress, progress_count=progress_count)
             self._update_cache(item, 'no_synced')
             if stats:
                 stats.add('no_synced')
@@ -394,8 +437,10 @@ class GetLrcPlugin(BeetsPlugin):
     def command(self, lib, opts, args):
         force = opts.force or self.config['overwrite'].get(bool)
         pretend = opts.pretend
+        quiet = opts.quiet
         show_stats = opts.stats or self.config['stats'].get(bool)
-        workers = self.config['workers'].get(int)
+        workers = opts.workers if getattr(opts, 'workers', None) is not None else self.config['workers'].get(int)
+        delay = opts.delay if getattr(opts, 'delay', None) is not None else self.config['delay'].get(float)
         stats = Stats() if show_stats else None
 
         # Collect all target items first
@@ -409,17 +454,18 @@ class GetLrcPlugin(BeetsPlugin):
         if not items:
             return
 
-        progress = Progress(len(items), self._use_color, self.config['progress'].get(bool)) if show_stats else None
+        progress_enabled = self.config['progress'].get(bool) and not quiet
+        progress = Progress(len(items), self._use_color, progress_enabled) if self.config['progress'].get(bool) else None
 
         # Threaded execution
         if workers > 1:
             def run(item):
                 try:
-                    if progress:
-                        progress.increment()
+                    count = progress.increment() if progress else None
                     self.fetch_lrc(item, force=force, pretend=pretend,
-                                 stats=stats, progress=progress)
-                    time.sleep(self.config['delay'].get(float))
+                                 stats=stats, progress=progress,
+                                 progress_count=count, quiet=quiet)
+                    time.sleep(delay)
                 except Exception as e:
                     self._log.error(f"Unhandled error for {displayable_path(item.path)}: {e}")
 
@@ -429,11 +475,11 @@ class GetLrcPlugin(BeetsPlugin):
         # Sequential execution
         else:
             for item in items:
-                if progress:
-                    progress.increment()
+                count = progress.increment() if progress else None
                 self.fetch_lrc(item, force=force, pretend=pretend,
-                             stats=stats, progress=progress)
-                time.sleep(self.config['delay'].get(float))
+                             stats=stats, progress=progress,
+                             progress_count=count, quiet=quiet)
+                time.sleep(delay)
 
         if progress:
             progress.finish()
