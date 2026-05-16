@@ -111,4 +111,4 @@ getlrc: Created: Wet Leg - Wet Leg - Chaise Longue
 - python 3.9 or later
 - internet
 ## Notes
-- This only fetches synced lyrics, so if lrclib.net does not have them, then no lrc files will be created.
+- Will create lrc files for both synced and non-synced lyrics. It perfers synced when available.
