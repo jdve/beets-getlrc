@@ -1,6 +1,6 @@
 # beets-getlrc
 
-A [beets](https://beets.io) plugin that downloads synced `.lrc` lyric files for your music library.
+A [beets](https://beets.io) plugin that downloads synced (and non-synced) `.lrc` lyric files for your music library.
 
 ## Quick Start
 
