@@ -56,16 +56,16 @@ class Stats:
         lines = [
             '',
             f"{c.BOLD}{'─'*50}{c.RESET}",
-            f"  {c.GREEN}{'Created (.lrc):':<<20}{c.RESET} {self.created}",
-            f"  {c.GREEN}{'Plain lyrics:':<<20}{c.RESET} {self.plain}",
-            f"  {'Skipped (exists):':<<20} {self.skipped}",
-            f"  {'Cached skip:':<<20} {self.cached}",
-            f"  {c.RED}{'Not found (404):':<<20}{c.RESET} {self.not_found}",
-            f"  {c.RED}{'No synced lyrics:':<<20}{c.RESET} {self.no_synced}",
-            f"  {c.YELLOW}{'Missing metadata:':<<20}{c.RESET} {self.missing_meta}",
-            f"  {c.RED}{'Errors:':<<20}{c.RESET} {self.errors}",
+            f"  {c.GREEN}{'Created (.lrc):':<20}{c.RESET} {self.created}",
+            f"  {c.GREEN}{'Plain lyrics:':<20}{c.RESET} {self.plain}",
+            f"  {'Skipped (exists):':<20} {self.skipped}",
+            f"  {'Cached skip:':<20} {self.cached}",
+            f"  {c.RED}{'Not found (404):':<20}{c.RESET} {self.not_found}",
+            f"  {c.RED}{'No synced lyrics:':<20}{c.RESET} {self.no_synced}",
+            f"  {c.YELLOW}{'Missing metadata:':<20}{c.RESET} {self.missing_meta}",
+            f"  {c.RED}{'Errors:':<20}{c.RESET} {self.errors}",
             f"{c.BOLD}{'─'*50}{c.RESET}",
-            f"  {c.BOLD}{'Total processed:':<<20}{c.RESET} {self.total}",
+            f"  {c.BOLD}{'Total processed:':<20}{c.RESET} {self.total}",
         ]
         print('\n'.join(lines))
 
@@ -150,6 +150,7 @@ class GetLrcPlugin(BeetsPlugin):
             'fallback_to_plain_lrc': False,
             'workers': 4,
             'progress': True,
+            'quiet_import': False,
             'output_dir': '',
             'sidecar_extensions': ['.lrc'],
         })
@@ -158,18 +159,28 @@ class GetLrcPlugin(BeetsPlugin):
         exts = self.config['sidecar_extensions'].get(list) or ['.lrc']
         self._sidecar_exts = [e if e.startswith('.') else f'.{e}' for e in exts]
 
-        # Queue to defer lyrics fetching until after import prompts
-        self._import_queue = []
-        self._import_queue_lock = threading.Lock()
-
         if self.config['auto']:
             self.register_listener('item_imported', self.item_imported)
             self.register_listener('album_imported', self.album_imported)
-            self.register_listener('import_task_done', self.import_task_done)
             # Move .lrc sidecar files when items are moved by beets
             self.register_listener('item_moved', self.item_moved)
             # Move .lrc sidecar files when albums (directories) are moved
             self.register_listener('album_moved', self.album_moved)
+
+    def _validate_and_constrain_workers(self, workers):
+        """Ensure worker count is reasonable and within system limits."""
+        MIN_WORKERS = 1
+        MAX_WORKERS = 64
+        
+        if workers < MIN_WORKERS:
+            self._log.warning(f'Workers {workers} is below minimum, using {MIN_WORKERS}')
+            return MIN_WORKERS
+        
+        if workers > MAX_WORKERS:
+            self._log.warning(f'Workers {workers} exceeds recommended max of {MAX_WORKERS}, clamping to {MAX_WORKERS}')
+            return MAX_WORKERS
+        
+        return workers
 
     def _safe_name(self, val):
         """Sanitize a string for use in a filesystem path."""
@@ -262,8 +273,15 @@ class GetLrcPlugin(BeetsPlugin):
     def _should_skip_cached(self, item, force):
         if force or not self.config['cache_results'].get(bool):
             return False
-        status = item.get('getlrc_status')
-        checked_str = item.get('getlrc_checked')
+        # Support both mapping-style items (item['key']) and attribute-style
+        try:
+            status = item.get('getlrc_status')
+        except Exception:
+            status = getattr(item, 'getlrc_status', None)
+        try:
+            checked_str = item.get('getlrc_checked')
+        except Exception:
+            checked_str = getattr(item, 'getlrc_checked', None)
         if not status or not checked_str:
             return False
         if status in ('created', 'exists'):
@@ -281,9 +299,25 @@ class GetLrcPlugin(BeetsPlugin):
     def _update_cache(self, item, status):
         if not self.config['cache_results'].get(bool):
             return
-        item['getlrc_status'] = status
-        item['getlrc_checked'] = datetime.now().isoformat()
-        item.store()
+        # Prefer mapping-style assignment, fall back to attributes
+        ts = datetime.now().isoformat()
+        try:
+            item['getlrc_status'] = status
+            item['getlrc_checked'] = ts
+        except Exception:
+            try:
+                setattr(item, 'getlrc_status', status)
+                setattr(item, 'getlrc_checked', ts)
+            except Exception:
+                # Can't cache on this item type
+                pass
+        # Call store() if available
+        try:
+            if hasattr(item, 'store') and callable(item.store):
+                item.store()
+        except Exception:
+            # Ignore store errors; caching is best-effort
+            pass
 
     def _get_lrc_path(self, item):
         """Determine the .lrc file path, respecting output_dir config."""
@@ -363,10 +397,14 @@ class GetLrcPlugin(BeetsPlugin):
 
             timeout = self.config['timeout'].get(int)
             retries = self.config['retries'].get(int)
+            
+            # Store status code separately to ensure we always have it for error reporting
+            response_status = None
 
             try:
                 self._log.debug(self._fmt('Querying lrclib', item))
                 response = self._request_with_retry(url, timeout, retries)
+                response_status = response.status_code  # Capture before raise_for_status()
                 response.raise_for_status()
                 data = response.json()
             except requests.Timeout:
@@ -376,13 +414,15 @@ class GetLrcPlugin(BeetsPlugin):
                     stats.add('errors')
                 return False
             except requests.HTTPError as e:
-                if e.response is not None and e.response.status_code == 404:
+                # Use captured status code, or extract from exception response, or fallback to '?'
+                code = response_status or getattr(e.response, 'status_code', None) or '?'
+                
+                if code == 404:
                     self._print('Not found', item, _C.RED, progress=progress, progress_count=progress_count)
                     self._update_cache(item, 'not_found')
                     if stats:
                         stats.add('not_found')
                 else:
-                    code = e.response.status_code if e.response else '?'
                     self._print(f'HTTP {code}', item, _C.RED, progress=progress, progress_count=progress_count)
                     self._update_cache(item, 'error')
                     if stats:
@@ -463,52 +503,37 @@ class GetLrcPlugin(BeetsPlugin):
         finally:
             pass
 
+    def _process_import_items(self, items, force, quiet):
+        delay = self.config['delay'].get(float)
+        workers = self._validate_and_constrain_workers(self.config['workers'].get(int))
+
+        def run(item):
+            try:
+                self.fetch_lrc(item, force=force, pretend=False,
+                             stats=None, progress=None, progress_count=None,
+                             quiet=quiet)
+                time.sleep(delay)
+            except Exception as e:
+                self._log.error(f"Error fetching lyrics for {displayable_path(item.path)}: {e}")
+
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                list(executor.map(run, items, timeout=None))
+        else:
+            for item in items:
+                run(item)
+
     def item_imported(self, lib, item):
-        """Queue item for deferred LRC fetch (after import prompts complete)."""
-        with self._import_queue_lock:
-            self._import_queue.append(item)
+        """Fetch LRC for a single imported item."""
+        force = self.config['overwrite'].get(bool)
+        quiet = self.config['quiet_import'].get(bool)
+        self._process_import_items([item], force, quiet)
 
     def album_imported(self, lib, album):
-        """Queue album items for deferred LRC fetch (after import prompts complete)."""
-        with self._import_queue_lock:
-            for item in album.items():
-                self._import_queue.append(item)
-
-    def import_task_done(self, lib, task, **kwargs):
-        """Process queued items after an import task completes (all prompts done)."""
-        # Collect items queued during this task
-        with self._import_queue_lock:
-            items_to_process = list(self._import_queue)
-            self._import_queue.clear()
-        
-        if not items_to_process:
-            return
-        
+        """Fetch LRC for all imported items in an album."""
         force = self.config['overwrite'].get(bool)
-        delay = self.config['delay'].get(float)
-        workers = self.config['workers'].get(int)
-        
-        # Process queued items with same threading/sequencing logic
-        if workers > 1:
-            def run(item):
-                try:
-                    self.fetch_lrc(item, force=force, quiet=False)
-                    time.sleep(delay)
-                except Exception as e:
-                    self._log.error(f"Error fetching lyrics for {displayable_path(item.path)}: {e}")
-
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                try:
-                    list(executor.map(run, items_to_process, timeout=None))
-                except Exception as e:
-                    self._log.error(f"Critical error in import lyrics worker: {e}")
-        else:
-            for item in items_to_process:
-                try:
-                    self.fetch_lrc(item, force=force, quiet=False)
-                    time.sleep(delay)
-                except Exception as e:
-                    self._log.error(f"Error fetching lyrics for {displayable_path(item.path)}: {e}")
+        quiet = self.config['quiet_import'].get(bool)
+        self._process_import_items(list(album.items()), force, quiet)
 
     def import_defer_start(self, task, **kwargs):
         """Process queued items after import task's choice prompt is done."""
@@ -516,7 +541,7 @@ class GetLrcPlugin(BeetsPlugin):
         # We process all queued items in the next idle moment after prompts.
         # However, since this can be called multiple times per import task,
         # we only process if the queue is substantial and likely done growing.
-        pass  # Actual processing happens in import_task_done
+        pass  # Nothing to defer; items are fetched immediately on import events
 
     def item_moved(self, *args, **kwargs):
         """Move sidecar files when an item file is moved.
@@ -540,16 +565,26 @@ class GetLrcPlugin(BeetsPlugin):
             else:
                 self._log.error('item_moved: unexpected args')
                 return
+        
+        # Validate inputs are not None
+        if source is None or destination is None:
+            self._log.error('item_moved: source or destination is None')
+            return
+        
+        if item is None:
+            self._log.error('item_moved: item is None')
+            return
 
         try:
             # Normalize to str paths (handle bytes from beets internals)
-            import os as _os
-            source_path = _os.fspath(source)
-            destination_path = _os.fspath(destination)
-            if isinstance(source_path, (bytes, bytearray)):
-                source_path = source_path.decode('utf-8', 'surrogateescape')
-            if isinstance(destination_path, (bytes, bytearray)):
-                destination_path = destination_path.decode('utf-8', 'surrogateescape')
+            # Use displayable_path for consistent handling with beets
+            source_path = displayable_path(source) if isinstance(source, bytes) else str(source)
+            destination_path = displayable_path(destination) if isinstance(destination, bytes) else str(destination)
+            
+            # Final validation
+            if not source_path or not destination_path:
+                self._log.error('item_moved: could not normalize paths')
+                return
 
             exts = getattr(self, '_sidecar_exts', None)
             if exts is None:
@@ -561,7 +596,8 @@ class GetLrcPlugin(BeetsPlugin):
                 if old.exists():
                     new.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(old), str(new))
-                    self._log.debug(self._fmt(f'Moved sidecar {ext}', item, _C.GREEN))
+                    # Log at INFO level so users see sidecar moves during beet move
+                    self._log.info(self._fmt(f'Moved sidecar {ext}', item, _C.GREEN))
         except Exception as e:
             self._log.error(self._fmt(f'Failed moving sidecar: {e}', item, _C.RED))
 
@@ -587,16 +623,22 @@ class GetLrcPlugin(BeetsPlugin):
             else:
                 self._log.error('album_moved: unexpected args')
                 return
+        
+        # Validate inputs are not None
+        if source is None or destination is None:
+            self._log.error('album_moved: source or destination is None')
+            return
 
         try:
             # Normalize to str paths (handle bytes from beets internals)
-            import os as _os
-            src_path = _os.fspath(source)
-            dst_path = _os.fspath(destination)
-            if isinstance(src_path, (bytes, bytearray)):
-                src_path = src_path.decode('utf-8', 'surrogateescape')
-            if isinstance(dst_path, (bytes, bytearray)):
-                dst_path = dst_path.decode('utf-8', 'surrogateescape')
+            # Use displayable_path for consistent handling with beets
+            src_path = displayable_path(source) if isinstance(source, bytes) else str(source)
+            dst_path = displayable_path(destination) if isinstance(destination, bytes) else str(destination)
+            
+            # Final validation
+            if not src_path or not dst_path:
+                self._log.error('album_moved: could not normalize paths')
+                return
 
             src_dir = Path(src_path)
             dst_dir = Path(dst_path)
@@ -617,7 +659,8 @@ class GetLrcPlugin(BeetsPlugin):
                     target = dst_dir.joinpath(rel)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(p), str(target))
-                    self._log.debug(f'Moved album sidecar {ext}: {p} -> {target}')
+                    # Log at INFO level so users see album sidecar moves during beet move
+                    self._log.info(f'Moved album sidecar {ext}: {p.name} -> {target.name}')
         except Exception as e:
             # Try get a representative item for logging
             rep = None
@@ -634,6 +677,10 @@ class GetLrcPlugin(BeetsPlugin):
         show_stats = opts.stats or self.config['stats'].get(bool)
         workers = opts.workers if getattr(opts, 'workers', None) is not None else self.config['workers'].get(int)
         delay = opts.delay if getattr(opts, 'delay', None) is not None else self.config['delay'].get(float)
+        
+        # Validate and constrain worker count for safety
+        workers = self._validate_and_constrain_workers(workers)
+        
         stats = Stats() if show_stats else None
 
         # Collect all target items first
@@ -664,6 +711,9 @@ class GetLrcPlugin(BeetsPlugin):
                     if progress:
                         progress.increment()
                     self._log.error(f"Error processing {displayable_path(item.path)}: {e}")
+                    # If stats tracking, increment error count
+                    if stats:
+                        stats.add('errors')
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 # Use list() to consume all results and let exceptions propagate if critical
@@ -685,6 +735,9 @@ class GetLrcPlugin(BeetsPlugin):
                     self._log.error(f"Error processing {displayable_path(item.path)}: {e}")
                     if progress:
                         progress.increment()
+                    # If stats tracking, increment error count
+                    if stats:
+                        stats.add('errors')
 
         if progress:
             progress.finish()

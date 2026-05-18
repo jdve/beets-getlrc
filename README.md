@@ -82,6 +82,7 @@ adjust the options as desired:
 | `stats` | `yes` | Print a summary of results when done |
 | `progress` | `yes` | Show per-track progress and progress bar |
 | `workers` | `4` | Number of concurrent requests; increase for faster fetching on good networks |
+| `quiet_import` | `no` | Suppress terminal output during automatic import-time fetching |
 
 ## Usage
 
