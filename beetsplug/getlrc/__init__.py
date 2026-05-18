@@ -205,6 +205,8 @@ class GetLrcPlugin(BeetsPlugin):
 
     def _fmt(self, status, item, color=''):
         """Format a log line: Status + Artist - Album - Title."""
+        if item is None:
+            return f"{status}: (unknown item)"
         artist = item.albumartist or item.artist or 'Unknown'
         album = item.album or 'Unknown Album'
         title = item.title or 'Unknown'
@@ -321,40 +323,17 @@ class GetLrcPlugin(BeetsPlugin):
 
     def _get_lrc_path(self, item):
         """Determine the .lrc file path, respecting output_dir config."""
-        lrc_basename = os.path.splitext(os.path.basename(displayable_path(item.path)))[0] + '.lrc'
-        
-        # Get output_dir template from config (handle None/empty)
         output_template = str(self.config['output_dir']).strip() if self.config['output_dir'] else ''
-        if output_template and output_template.lower() == 'none':
-            output_template = ''
-        
-        # Determine the target directory
-        if output_template:
-            # Use configured output directory template
+        if output_template and output_template.lower() != 'none':
+            lrc_basename = os.path.splitext(os.path.basename(displayable_path(item.path)))[0] + '.lrc'
             dir_path = self._expand_output_dir(output_template, item)
-            # Make absolute if relative
             if not os.path.isabs(dir_path):
                 dir_path = os.path.abspath(dir_path)
-        else:
-            # Default: use the same directory as the audio file
-            audio_path = displayable_path(item.path)
-            if not os.path.isabs(audio_path):
-                library_dir = displayable_path(config['directory'].as_filename())
-                if not os.path.isabs(library_dir):
-                    library_dir = os.path.abspath(os.path.expanduser(library_dir))
-                audio_path = os.path.join(library_dir, audio_path)
-            dir_path = os.path.dirname(audio_path)
-        
-        # Final safety check: ensure path is absolute
-        if not os.path.isabs(dir_path):
-            dir_path = os.path.abspath(dir_path)
-        
-        # Create directory if needed
-        os.makedirs(dir_path, exist_ok=True)
-        
-        # Build full path and return as bytes
-        lrc_path_str = os.path.join(dir_path, lrc_basename)
-        return bytestring_path(lrc_path_str)
+            os.makedirs(dir_path, exist_ok=True)
+            return bytestring_path(os.path.join(dir_path, lrc_basename))
+
+        # Default: trust beets' already-normalized path and just swap the extension.
+        return os.path.splitext(item.path)[0] + bytestring_path('.lrc')
 
     def fetch_lrc(self, item, force=False, pretend=False, stats=None, progress=None, progress_count=None, quiet=False):
         try:
@@ -565,22 +544,21 @@ class GetLrcPlugin(BeetsPlugin):
             else:
                 self._log.error('item_moved: unexpected args')
                 return
-        
+
         # Validate inputs are not None
         if source is None or destination is None:
             self._log.error('item_moved: source or destination is None')
             return
-        
+
         if item is None:
             self._log.error('item_moved: item is None')
             return
 
         try:
-            # Normalize to str paths (handle bytes from beets internals)
-            # Use displayable_path for consistent handling with beets
-            source_path = displayable_path(source) if isinstance(source, bytes) else str(source)
-            destination_path = displayable_path(destination) if isinstance(destination, bytes) else str(destination)
-            
+            # Use syspath() so long paths work correctly on Windows
+            source_path = syspath(source) if isinstance(source, bytes) else source
+            destination_path = syspath(destination) if isinstance(destination, bytes) else destination
+
             # Final validation
             if not source_path or not destination_path:
                 self._log.error('item_moved: could not normalize paths')
@@ -596,7 +574,6 @@ class GetLrcPlugin(BeetsPlugin):
                 if old.exists():
                     new.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(old), str(new))
-                    # Log at INFO level so users see sidecar moves during beet move
                     self._log.info(self._fmt(f'Moved sidecar {ext}', item, _C.GREEN))
         except Exception as e:
             self._log.error(self._fmt(f'Failed moving sidecar: {e}', item, _C.RED))
@@ -623,18 +600,17 @@ class GetLrcPlugin(BeetsPlugin):
             else:
                 self._log.error('album_moved: unexpected args')
                 return
-        
+
         # Validate inputs are not None
         if source is None or destination is None:
             self._log.error('album_moved: source or destination is None')
             return
 
         try:
-            # Normalize to str paths (handle bytes from beets internals)
-            # Use displayable_path for consistent handling with beets
-            src_path = displayable_path(source) if isinstance(source, bytes) else str(source)
-            dst_path = displayable_path(destination) if isinstance(destination, bytes) else str(destination)
-            
+            # Use syspath() so long paths work correctly on Windows
+            src_path = syspath(source) if isinstance(source, bytes) else source
+            dst_path = syspath(destination) if isinstance(destination, bytes) else destination
+
             # Final validation
             if not src_path or not dst_path:
                 self._log.error('album_moved: could not normalize paths')
@@ -659,10 +635,8 @@ class GetLrcPlugin(BeetsPlugin):
                     target = dst_dir.joinpath(rel)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(p), str(target))
-                    # Log at INFO level so users see album sidecar moves during beet move
                     self._log.info(f'Moved album sidecar {ext}: {p.name} -> {target.name}')
         except Exception as e:
-            # Try get a representative item for logging
             rep = None
             try:
                 rep = album.items()[0]

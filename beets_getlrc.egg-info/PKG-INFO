@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: beets-getlrc
-Version: 0.1.11
+Version: 0.1.12
 Summary: Fetch synced .lrc lyrics from lrclib.net for beets
 License: MIT
 Project-URL: Homepage, https://github.com/jaedonswanson/beets-getlrc
@@ -150,14 +150,8 @@ getlrc: Created: Wet Leg - Wet Leg - Chaise Longue
 
 ## Requirements
 - beets 2.0.0 or newer
-<<<<<<< HEAD
 - python 3.9 or later
 - internet
-## Notes
-- Will create lrc files for both synced and non-synced lyrics. It perfers synced when available.
-=======
-- Python 3.9 or later
-- Internet connection
 
 ## Features & Notes
 
@@ -168,24 +162,6 @@ getlrc: Created: Wet Leg - Wet Leg - Chaise Longue
 - **Clean import** — During `beet import`, fetching happens silently after all user prompts are done, keeping your terminal uncluttered.
 - **Synced lyrics only by default** — If lrclib.net doesn't have synced lyrics for a track, no `.lrc` file is created (unless you enable a fallback option).
 
-## Fallback Examples
-
-### Store plain lyrics in database (if synced unavailable)
-```yaml
-plugins:
-  - getlrc
-getlrc:
-  fallback_to_plain: yes
-```
-
-### Write plain lyrics as `.lrc` files (if synced unavailable)
-```yaml
-plugins:
-  - getlrc
-getlrc:
-  fallback_to_plain_lrc: yes
-```
-
 ### Both synced and plain fallback
 ```yaml
 plugins:
@@ -194,4 +170,3 @@ getlrc:
   fallback_to_plain: yes
   fallback_to_plain_lrc: yes
 ```
->>>>>>> c44ad21 (Update)
