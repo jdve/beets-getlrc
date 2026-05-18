@@ -338,6 +338,7 @@ class GetLrcPlugin(BeetsPlugin):
         if not os.path.isabs(item_path):
             library_dir = bytestring_path(config['directory'].as_filename())
             item_path = os.path.join(library_dir, item_path)
+        item_path = os.path.normpath(item_path)
         return os.path.splitext(item_path)[0] + bytestring_path('.lrc')
 
     def fetch_lrc(self, item, force=False, pretend=False, stats=None, progress=None, progress_count=None, quiet=False):
